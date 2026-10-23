@@ -128,6 +128,7 @@ by `setup-prefix.sh`.
 git clone <this repo> && cd broadcast-linux
 
 scripts/build.sh                      # builds everything into build/ (installs Zig in ~/.cache/nvb-build, no root)
+scripts/build-ffmpeg.sh               # optional, only for the Files tab with video: downloads FFmpeg 8.1 and builds two parts
 scripts/setup-prefix.sh --installer ~/nvidia-files/broadcast-installer \
                         --nvngx-update ~/nvidia-files/driver/Display.Driver/nvngx_update.exe
 scripts/deploy.sh                     # installs the shims and patches into the runner and the prefix
@@ -229,6 +230,19 @@ through shared memory.
    shared header. The bridge only runs its graph, and thus only keeps the real webcam on, while somebody watches the
    virtual one. Without a fresh frame for 1.5 s it sends black.
 
+## File processing (Files tab)
+
+Wine lacks three things the core needs to process files, all supplied without touching `NvBroadcastCore.dll` (it is
+signature-checked; the shim redirects the core's imports from `mfreadwrite.dll`/`mfplat.dll` at runtime, `src/nvcuda-shim/mfhooks.c`):
+
+- **WAV output**: Wine's sink writer cannot create a `.wav` (`MFCreateSinkWriterFromURL` fails with `0x80004003`, job error
+  -9111). The shim provides a small WAV `IMFSinkWriter`.
+- **Video input**: Wine lists the decoded format (NV12) before the compressed one (H264) as the native type of a video
+  stream, and the core reads type 0 as the codec ("Source video codec is not supported"). The shim reorders them.
+- **MP4 output**: GE-Proton's bundled `libavformat` has no muxers (`Requested output format 'mp4' is not known`) and Wine
+  has no AAC encoder (`No AAC encoder MFT found`). `scripts/build-ffmpeg.sh` builds a `libavformat` with muxers and
+  `nvb_aac.dll`, an AAC encoder transform on FFmpeg's native AAC encoder (`src/aac-mft`). Needs `gcc`, `make`, `curl`.
+
 ## Fragile points
 
 - **Driver updates**: after updating the NVIDIA driver the C4G offset in `src/nvcuda-shim/shim.c` can change. Symptom: no
@@ -237,6 +251,8 @@ through shared memory.
 - **Runner updates**: the qcap patches are specific to GE-Proton11-11. A runner update replaces the patched files too;
   rerun `scripts/deploy.sh` (it refuses unknown builds) and the shims are redeployed.
 - **NVIDIA Broadcast updates**: the replacements of the audio library and the signature check on the core may break.
+- **Runner updates and video export**: `deploy.sh` replaces GE's `libavformat.so.62.12.100` with the one built by
+  `build-ffmpeg.sh`. A runner with a different FFmpeg version needs the matching FFmpeg source (the script checks).
 - **GPU memory**: the app and the effects need several hundred MiB of VRAM; with other GPU-heavy programs open an
   `NV_ERR_NO_MEMORY` was seen in the kernel log once.
 - Log noise that is harmless: `[CRMAIN] Received empty frame from local processor with status: 5 | Dropping frame`.
@@ -248,6 +264,7 @@ nvidia-broadcast.sh       launcher
 nvidia-broadcast.desktop  application menu entry template (installed by deploy.sh)
 scripts/build.sh          build all components with Zig
 scripts/setup-prefix.sh   create prefix, run the installer, download models
+scripts/build-ffmpeg.sh   FFmpeg-based parts for video export (libavformat with muxers, nvb_aac.dll)
 scripts/deploy.sh         install shims and patches into runner and prefix
 scripts/patch-qcap.py     verified binary patches of Wine qcap
 scripts/setup-vcam.sh     configure v4l2loopback (root)
@@ -256,9 +273,23 @@ src/nvapi-shim            NVAPI shim
 src/vad-replacement       virtual audio device library replacement
 src/vcam-bridge           Wine-side bridge, Linux-side feeder, shared header
 src/tools/v4lgrab.c       minimal V4L2 reader to test the virtual camera
+src/aac-mft               AAC encoder MFT (nvb_aac.dll) on FFmpeg's AAC encoder
 src/probes                small Windows probes used while debugging
 debug/                    gdb command file and a Chrome DevTools client for the app's UI
 ```
 
 `NVB_DEV_EXEC=1` enables a developer hook in the nvcuda shim that runs commands written to `/tmp/nvb_exec.cmd` inside
 the running Wine session (a second `umu-run` hangs while the app is open). Do not set it for normal use.
+
+## License and third-party components
+
+The code of this repository is released under the MIT license (`LICENSE`). This project is not affiliated with or
+endorsed by NVIDIA. It contains no NVIDIA software: you need your own NVIDIA Broadcast installer (see "Gathering files"),
+and the shims only reimplement the interfaces of the NVIDIA libraries.
+
+- **FFmpeg** (LGPL 2.1 or later): not stored in this repository. `scripts/build-ffmpeg.sh` downloads the sources from
+  ffmpeg.org and builds them on your machine, without `--enable-gpl` or `--enable-nonfree`. If you redistribute the
+  resulting `libavformat.so.62` or `nvb_aac.dll` (which links FFmpeg statically) you must comply with the LGPL: license
+  text, the corresponding source and configure options, and a way to relink. AAC and H.264 may also be covered by patent
+  licenses in your country; check before distributing binaries.
+- **Wine / GE-Proton** (LGPL 2.1 or later): `patch-qcap.py` and `deploy.sh` modify a local copy and redistribute nothing.

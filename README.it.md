@@ -127,6 +127,7 @@ A installazione finita puoi cancellare la cartella da 730 MB e i `.exe` scaricat
 git clone <questo repo> && cd broadcast-linux
 
 scripts/build.sh                      # compila tutto in build/ (installa Zig in ~/.cache/nvb-build, senza root)
+scripts/build-ffmpeg.sh               # facoltativo, solo per la scheda File con i video: scarica FFmpeg 8.1 e compila due parti
 scripts/setup-prefix.sh --installer ~/nvidia-files/broadcast-installer \
                         --nvngx-update ~/nvidia-files/driver/Display.Driver/nvngx_update.exe
 scripts/deploy.sh                     # installa shim e patch nel runner e nel prefix
@@ -232,6 +233,21 @@ memoria condivisa.
    tramite l'header condiviso. Il bridge esegue il suo grafo, e quindi tiene accesa la webcam vera, solo mentre
    qualcuno guarda quella virtuale. Senza un frame recente da 1,5 s invia nero.
 
+## Elaborazione file (scheda File)
+
+A Wine mancano tre cose di cui il core ha bisogno per elaborare i file. Sono tutte fornite senza toccare
+`NvBroadcastCore.dll` (ha il controllo della firma; lo shim reindirizza a runtime gli import del core da
+`mfreadwrite.dll`/`mfplat.dll`, `src/nvcuda-shim/mfhooks.c`):
+
+- **Output WAV**: il sink writer di Wine non sa creare un `.wav` (`MFCreateSinkWriterFromURL` fallisce con `0x80004003`,
+  errore del job -9111). Lo shim fornisce un piccolo `IMFSinkWriter` WAV.
+- **Input video**: Wine elenca il formato decodificato (NV12) prima di quello compresso (H264) come tipo nativo di uno
+  stream video, e il core legge il tipo 0 come codec ("Source video codec is not supported"). Lo shim li riordina.
+- **Output MP4**: il `libavformat` incluso in GE-Proton non ha muxer (`Requested output format 'mp4' is not known`) e
+  Wine non ha un encoder AAC (`No AAC encoder MFT found`). `scripts/build-ffmpeg.sh` compila un `libavformat` con i
+  muxer e `nvb_aac.dll`, una transform AAC basata sull'encoder AAC nativo di FFmpeg (`src/aac-mft`). Servono `gcc`,
+  `make`, `curl`.
+
 ## Punti fragili
 
 - **Aggiornamenti del driver**: dopo un aggiornamento del driver NVIDIA l'offset C4G in `src/nvcuda-shim/shim.c` può
@@ -241,6 +257,9 @@ memoria condivisa.
 - **Aggiornamenti del runner**: le patch qcap sono specifiche per GE-Proton11-11. Un aggiornamento del runner sostituisce
   anche i file patchati; riesegui `scripts/deploy.sh` (rifiuta le build sconosciute) e le shim vengono reinstallate.
 - **Aggiornamenti di NVIDIA Broadcast**: le sostituzioni della libreria audio e il controllo della firma sul core
+- **Aggiornamenti del runner e export video**: `deploy.sh` sostituisce il `libavformat.so.62.12.100` di GE con quello
+  compilato da `build-ffmpeg.sh`. Un runner con un'altra versione di FFmpeg richiede il sorgente FFmpeg corrispondente (lo
+  script lo controlla).
   possono rompersi.
 - **Memoria GPU**: l'app e gli effetti usano diverse centinaia di MiB di VRAM; con altri programmi pesanti sulla GPU è
   comparso una volta un `NV_ERR_NO_MEMORY` nel log del kernel.
@@ -253,6 +272,7 @@ nvidia-broadcast.sh       launcher
 nvidia-broadcast.desktop  modello della voce di menu (installato da deploy.sh)
 scripts/build.sh          compila tutti i componenti con Zig
 scripts/setup-prefix.sh   crea il prefix, esegue l'installer, scarica i modelli
+scripts/build-ffmpeg.sh   parti basate su FFmpeg per l'export video (libavformat con muxer, nvb_aac.dll)
 scripts/deploy.sh         installa shim e patch in runner e prefix
 scripts/patch-qcap.py     patch binarie verificate di qcap di Wine
 scripts/setup-vcam.sh     configura v4l2loopback (root)
@@ -268,3 +288,17 @@ debug/                    file di comandi gdb e client Chrome DevTools per la UI
 `NVB_DEV_EXEC=1` abilita nella shim nvcuda un hook per sviluppatori che esegue i comandi scritti in
 `/tmp/nvb_exec.cmd` dentro la sessione Wine in corso (un secondo `umu-run` si blocca mentre l'app è aperta). Non
 impostarlo nell'uso normale.
+
+## Licenza e componenti di terzi
+
+Il codice di questo repository è rilasciato con licenza MIT (`LICENSE`). Il progetto non è affiliato né approvato da
+NVIDIA. Non contiene software NVIDIA: serve il tuo installer di NVIDIA Broadcast (vedi "Reperire i file") e gli shim
+reimplementano soltanto le interfacce delle librerie NVIDIA.
+
+- **FFmpeg** (LGPL 2.1 o successiva): non è nel repository. `scripts/build-ffmpeg.sh` scarica i sorgenti da ffmpeg.org e
+  li compila sul tuo computer, senza `--enable-gpl` né `--enable-nonfree`. Se ridistribuisci il `libavformat.so.62` o
+  `nvb_aac.dll` risultanti (che collega FFmpeg staticamente) devi rispettare la LGPL: testo della licenza, sorgente
+  corrispondente e opzioni di configure, possibilità di rilinkare. AAC e H.264 possono inoltre richiedere licenze
+  sui brevetti nel tuo paese: verifica prima di distribuire binari.
+- **Wine / GE-Proton** (LGPL 2.1 o successiva): `patch-qcap.py` e `deploy.sh` modificano una copia locale e non
+  ridistribuiscono nulla.

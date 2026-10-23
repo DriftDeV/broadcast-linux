@@ -37,5 +37,17 @@ ICON="$PREFIX/pfx/drive_c/proton_shortcuts/icons/256x256/apps/C74F_NVIDIA Broadc
 [ -f "$ICON" ] || ICON=camera-video
 sed -e "s#@ROOT@#$ROOT#" -e "s#@ICON@#$ICON#" "$ROOT/nvidia-broadcast.desktop" > "$HOME/.local/share/applications/nvidia-broadcast.desktop"
 
+# AAC encoder MFT (optional: scripts/build-ffmpeg.sh); the shim loads it from system32
+[ -f "$B/nvb_aac.dll" ] && install -m 755 "$B/nvb_aac.dll" "$SYS32/nvb_aac.dll"
+
+# libavformat with mp4/mov/wav muxers (optional: needs scripts/build-ffmpeg.sh); replaces GE's demux-only copy
+if [ -f "$B/libavformat.so.62" ]; then
+    AVF="$RUNNER/files/lib/x86_64-linux-gnu/libavformat.so.62.12.100"
+    keep_orig "$AVF"
+    install -m 755 "$B/libavformat.so.62" "$AVF"
+else
+    echo "note: build/libavformat.so.62 missing, video export will fail (run scripts/build-ffmpeg.sh)"
+fi
+
 python3 "$ROOT/scripts/patch-qcap.py"
 echo "deployed."

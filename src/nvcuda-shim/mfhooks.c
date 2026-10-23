@@ -354,10 +354,20 @@ static void *hook_import(BYTE *base, const char *func, void *hook)
     return NULL;
 }
 
+/* 3. AAC encoder: Wine has none and the core needs one for mp4 output. nvb_aac.dll registers a local MFT. */
+static void register_aac_encoder(void)
+{
+    HMODULE m = LoadLibraryA("nvb_aac.dll");
+    HRESULT (*reg)(void) = m ? (HRESULT (*)(void))GetProcAddress(m, "nvb_aac_register") : NULL;
+    if (!reg) { logf_("mfhooks: nvb_aac.dll not available (%lu), mp4 export will fail", GetLastError()); return; }
+    logf_("mfhooks: AAC encoder MFT registered hr=%08lx", reg());
+}
+
 void mfhooks_install(void)
 {
     BYTE *base = (BYTE *)GetModuleHandleA("NvBroadcastCore.dll");
     if (!base) return;
+    register_aac_encoder();
     real_create_from_url = (create_from_url_t)hook_import(base, "MFCreateSinkWriterFromURL", hook_create_from_url);
     real_create_reader_url = (create_reader_url_t)hook_import(base, "MFCreateSourceReaderFromURL", hook_create_reader_url);
 }
