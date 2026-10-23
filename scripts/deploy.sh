@@ -37,8 +37,9 @@ ICON="$PREFIX/pfx/drive_c/proton_shortcuts/icons/256x256/apps/C74F_NVIDIA Broadc
 [ -f "$ICON" ] || ICON=camera-video
 sed -e "s#@ROOT@#$ROOT#" -e "s#@ICON@#$ICON#" "$ROOT/nvidia-broadcast.desktop" > "$HOME/.local/share/applications/nvidia-broadcast.desktop"
 
-# AAC encoder MFT (optional: scripts/build-ffmpeg.sh); the shim loads it from system32
-[ -f "$B/nvb_aac.dll" ] && install -m 755 "$B/nvb_aac.dll" "$SYS32/nvb_aac.dll"
+# AAC encoder + mp4 sink writer (optional: scripts/build-ffmpeg.sh); the shim loads it from system32
+rm -f "$SYS32/nvb_aac.dll"
+[ -f "$B/nvb_media.dll" ] && install -m 755 "$B/nvb_media.dll" "$SYS32/nvb_media.dll"
 
 # libavformat with mp4/mov/wav muxers (optional: needs scripts/build-ffmpeg.sh); replaces GE's demux-only copy
 if [ -f "$B/libavformat.so.62" ]; then

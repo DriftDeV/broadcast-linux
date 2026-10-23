@@ -243,10 +243,10 @@ A Wine mancano tre cose di cui il core ha bisogno per elaborare i file. Sono tut
   errore del job -9111). Lo shim fornisce un piccolo `IMFSinkWriter` WAV.
 - **Input video**: Wine elenca il formato decodificato (NV12) prima di quello compresso (H264) come tipo nativo di uno
   stream video, e il core legge il tipo 0 come codec ("Source video codec is not supported"). Lo shim li riordina.
-- **Output MP4**: il `libavformat` incluso in GE-Proton non ha muxer (`Requested output format 'mp4' is not known`) e
-  Wine non ha un encoder AAC (`No AAC encoder MFT found`). `scripts/build-ffmpeg.sh` compila un `libavformat` con i
-  muxer e `nvb_aac.dll`, una transform AAC basata sull'encoder AAC nativo di FFmpeg (`src/aac-mft`). Servono `gcc`,
-  `make`, `curl`.
+- **Output MP4**: il `libavformat` incluso in GE-Proton non ha muxer, Wine non ha un encoder AAC (`No AAC encoder MFT
+  found`) e il suo media sink MP4 è un abbozzo (`BeginWriting` fallisce con `E_NOTIMPL`). `scripts/build-ffmpeg.sh`
+  compila un `libavformat` con i muxer e `nvb_media.dll` (`src/media`): una transform AAC e un sink writer mp4, entrambi
+  su FFmpeg. Il video lo codifica il core con NVENC. Servono `gcc`, `make`, `curl`.
 
 ## Punti fragili
 
@@ -272,7 +272,7 @@ nvidia-broadcast.sh       launcher
 nvidia-broadcast.desktop  modello della voce di menu (installato da deploy.sh)
 scripts/build.sh          compila tutti i componenti con Zig
 scripts/setup-prefix.sh   crea il prefix, esegue l'installer, scarica i modelli
-scripts/build-ffmpeg.sh   parti basate su FFmpeg per l'export video (libavformat con muxer, nvb_aac.dll)
+scripts/build-ffmpeg.sh   parti basate su FFmpeg per l'export video (libavformat con muxer, nvb_media.dll)
 scripts/deploy.sh         installa shim e patch in runner e prefix
 scripts/patch-qcap.py     patch binarie verificate di qcap di Wine
 scripts/setup-vcam.sh     configura v4l2loopback (root)
@@ -297,7 +297,7 @@ reimplementano soltanto le interfacce delle librerie NVIDIA.
 
 - **FFmpeg** (LGPL 2.1 o successiva): non è nel repository. `scripts/build-ffmpeg.sh` scarica i sorgenti da ffmpeg.org e
   li compila sul tuo computer, senza `--enable-gpl` né `--enable-nonfree`. Se ridistribuisci il `libavformat.so.62` o
-  `nvb_aac.dll` risultanti (che collega FFmpeg staticamente) devi rispettare la LGPL: testo della licenza, sorgente
+  `nvb_media.dll` risultanti (che collega FFmpeg staticamente) devi rispettare la LGPL: testo della licenza, sorgente
   corrispondente e opzioni di configure, possibilità di rilinkare. AAC e H.264 possono inoltre richiedere licenze
   sui brevetti nel tuo paese: verifica prima di distribuire binari.
 - **Wine / GE-Proton** (LGPL 2.1 o successiva): `patch-qcap.py` e `deploy.sh` modificano una copia locale e non

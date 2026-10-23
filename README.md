@@ -239,9 +239,10 @@ signature-checked; the shim redirects the core's imports from `mfreadwrite.dll`/
   -9111). The shim provides a small WAV `IMFSinkWriter`.
 - **Video input**: Wine lists the decoded format (NV12) before the compressed one (H264) as the native type of a video
   stream, and the core reads type 0 as the codec ("Source video codec is not supported"). The shim reorders them.
-- **MP4 output**: GE-Proton's bundled `libavformat` has no muxers (`Requested output format 'mp4' is not known`) and Wine
-  has no AAC encoder (`No AAC encoder MFT found`). `scripts/build-ffmpeg.sh` builds a `libavformat` with muxers and
-  `nvb_aac.dll`, an AAC encoder transform on FFmpeg's native AAC encoder (`src/aac-mft`). Needs `gcc`, `make`, `curl`.
+- **MP4 output**: GE-Proton's bundled `libavformat` has no muxers, Wine has no AAC encoder (`No AAC encoder MFT found`)
+  and its MP4 media sink is a stub (`BeginWriting` fails with `E_NOTIMPL`). `scripts/build-ffmpeg.sh` builds a
+  `libavformat` with muxers and `nvb_media.dll` (`src/media`): an AAC encoder transform and an mp4 sink writer, both on
+  FFmpeg. The video itself is encoded by the core with NVENC. Needs `gcc`, `make`, `curl`.
 
 ## Fragile points
 
@@ -264,7 +265,7 @@ nvidia-broadcast.sh       launcher
 nvidia-broadcast.desktop  application menu entry template (installed by deploy.sh)
 scripts/build.sh          build all components with Zig
 scripts/setup-prefix.sh   create prefix, run the installer, download models
-scripts/build-ffmpeg.sh   FFmpeg-based parts for video export (libavformat with muxers, nvb_aac.dll)
+scripts/build-ffmpeg.sh   FFmpeg-based parts for video export (libavformat with muxers, nvb_media.dll)
 scripts/deploy.sh         install shims and patches into runner and prefix
 scripts/patch-qcap.py     verified binary patches of Wine qcap
 scripts/setup-vcam.sh     configure v4l2loopback (root)
@@ -273,7 +274,7 @@ src/nvapi-shim            NVAPI shim
 src/vad-replacement       virtual audio device library replacement
 src/vcam-bridge           Wine-side bridge, Linux-side feeder, shared header
 src/tools/v4lgrab.c       minimal V4L2 reader to test the virtual camera
-src/aac-mft               AAC encoder MFT (nvb_aac.dll) on FFmpeg's AAC encoder
+src/media                 nvb_media.dll: AAC encoder MFT and mp4 sink writer on FFmpeg
 src/probes                small Windows probes used while debugging
 debug/                    gdb command file and a Chrome DevTools client for the app's UI
 ```
@@ -289,7 +290,7 @@ and the shims only reimplement the interfaces of the NVIDIA libraries.
 
 - **FFmpeg** (LGPL 2.1 or later): not stored in this repository. `scripts/build-ffmpeg.sh` downloads the sources from
   ffmpeg.org and builds them on your machine, without `--enable-gpl` or `--enable-nonfree`. If you redistribute the
-  resulting `libavformat.so.62` or `nvb_aac.dll` (which links FFmpeg statically) you must comply with the LGPL: license
+  resulting `libavformat.so.62` or `nvb_media.dll` (which links FFmpeg statically) you must comply with the LGPL: license
   text, the corresponding source and configure options, and a way to relink. AAC and H.264 may also be covered by patent
   licenses in your country; check before distributing binaries.
 - **Wine / GE-Proton** (LGPL 2.1 or later): `patch-qcap.py` and `deploy.sh` modify a local copy and redistribute nothing.

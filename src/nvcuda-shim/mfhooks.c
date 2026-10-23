@@ -21,6 +21,8 @@ extern void logf_(const char *fmt, ...);
 
 typedef HRESULT (WINAPI *create_from_url_t)(LPCWSTR, IMFByteStream *, IMFAttributes *, IMFSinkWriter **);
 static create_from_url_t real_create_from_url;
+typedef HRESULT (*mp4_create_t)(LPCWSTR, IMFSinkWriter **);
+static mp4_create_t mp4_create;     /* from nvb_media.dll, see load_media_dll() */
 
 typedef struct {
     const IMFSinkWriterVtbl *lpVtbl;
@@ -201,6 +203,12 @@ static const IMFSinkWriterVtbl wav_vtbl = {
     w_SendStreamTick, w_PlaceMarker, w_NotifyEndOfSegment, w_Flush, w_Finalize, w_GetServiceForStream, w_GetStatistics,
 };
 
+static BOOL url_has_ext(LPCWSTR url, LPCWSTR ext)
+{
+    size_t n = wcslen(url), e = wcslen(ext);
+    return n > e && !_wcsicmp(url + n - e, ext);
+}
+
 static BOOL is_wav_url(LPCWSTR url)
 {
     size_t n = wcslen(url);
@@ -237,6 +245,11 @@ static HRESULT WINAPI hook_create_from_url(LPCWSTR url, IMFByteStream *bs, IMFAt
         *out = (IMFSinkWriter *)w;
         logf_("wavwriter: created for %ls", url);
         return S_OK;
+    }
+    if (url && !bs && out && mp4_create && (url_has_ext(url, L".mp4") || url_has_ext(url, L".m4a") || url_has_ext(url, L".mov"))) {
+        HRESULT hr = mp4_create(url, out);
+        logf_("mfhooks: mp4 sink writer for %ls = %08lx", url, hr);
+        return hr;
     }
     {
         HRESULT hr = real_create_from_url(url, bs, attr, out);
@@ -323,8 +336,8 @@ static HRESULT WINAPI hook_create_reader_url(LPCWSTR url, IMFAttributes *attr, I
     return hr;
 }
 
-/* point one of the core's imports from mfreadwrite.dll at a replacement, return the original */
-static void *hook_import(BYTE *base, const char *func, void *hook)
+/* point one of the core's imports from `dll` at a replacement, return the original */
+static void *hook_import(BYTE *base, const char *dll, const char *func, void *hook)
 {
     IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
     IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
@@ -332,7 +345,7 @@ static void *hook_import(BYTE *base, const char *func, void *hook)
     if (!dir.VirtualAddress) return NULL;
     for (imp = (IMAGE_IMPORT_DESCRIPTOR *)(base + dir.VirtualAddress); imp->Name; imp++) {
         IMAGE_THUNK_DATA *names, *funcs;
-        if (_stricmp((char *)base + imp->Name, "mfreadwrite.dll")) continue;
+        if (_stricmp((char *)base + imp->Name, dll)) continue;
         names = (IMAGE_THUNK_DATA *)(base + imp->OriginalFirstThunk);
         funcs = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
         for (; names->u1.AddressOfData; names++, funcs++) {
@@ -354,20 +367,40 @@ static void *hook_import(BYTE *base, const char *func, void *hook)
     return NULL;
 }
 
-/* 3. AAC encoder: Wine has none and the core needs one for mp4 output. nvb_aac.dll registers a local MFT. */
-static void register_aac_encoder(void)
+/* Local MFTs are only returned when the caller passes MFT_ENUM_FLAG_LOCALMFT, which the core (written for Windows,
+   where its encoders are system MFTs) does not. Add the flag for audio encoder enumerations. */
+typedef HRESULT (WINAPI *mft_enum_ex_t)(GUID, UINT32, const MFT_REGISTER_TYPE_INFO *, const MFT_REGISTER_TYPE_INFO *, IMFActivate ***, UINT32 *);
+static mft_enum_ex_t real_mft_enum_ex;
+
+static HRESULT WINAPI hook_mft_enum_ex(GUID category, UINT32 flags, const MFT_REGISTER_TYPE_INFO *in, const MFT_REGISTER_TYPE_INFO *out, IMFActivate ***acts, UINT32 *count)
 {
-    HMODULE m = LoadLibraryA("nvb_aac.dll");
+    HRESULT hr;
+    if (IsEqualGUID(&category, &MFT_CATEGORY_AUDIO_ENCODER)) flags |= MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SYNCMFT;
+    hr = real_mft_enum_ex(category, flags, in, out, acts, count);
+    if (IsEqualGUID(&category, &MFT_CATEGORY_AUDIO_ENCODER))
+        logf_("mfhooks: MFTEnumEx(audio encoder, flags=%x, out=%08lx) = %08lx count=%u", flags, out ? out->guidSubtype.Data1 : 0, hr, count ? *count : 0);
+    return hr;
+}
+
+/* 3. nvb_media.dll (FFmpeg based): AAC encoder, which Wine lacks and the core needs for mp4 output, and an mp4 sink
+   writer, because Wine's mp4 media sink is a stub. */
+static void load_media_dll(void)
+{
+    HMODULE m = LoadLibraryA("nvb_media.dll");
     HRESULT (*reg)(void) = m ? (HRESULT (*)(void))GetProcAddress(m, "nvb_aac_register") : NULL;
-    if (!reg) { logf_("mfhooks: nvb_aac.dll not available (%lu), mp4 export will fail", GetLastError()); return; }
-    logf_("mfhooks: AAC encoder MFT registered hr=%08lx", reg());
+    void (*set_logger)(void (*)(const char *, ...)) = m ? (void (*)(void (*)(const char *, ...)))GetProcAddress(m, "nvb_media_set_logger") : NULL;
+    if (!reg) { logf_("mfhooks: nvb_media.dll not available (%lu), mp4 export will fail", GetLastError()); return; }
+    if (set_logger) set_logger(logf_);
+    mp4_create = (mp4_create_t)GetProcAddress(m, "nvb_mp4_create");
+    logf_("mfhooks: AAC encoder MFT registered hr=%08lx, mp4 sink %s", reg(), mp4_create ? "available" : "missing");
 }
 
 void mfhooks_install(void)
 {
     BYTE *base = (BYTE *)GetModuleHandleA("NvBroadcastCore.dll");
     if (!base) return;
-    register_aac_encoder();
-    real_create_from_url = (create_from_url_t)hook_import(base, "MFCreateSinkWriterFromURL", hook_create_from_url);
-    real_create_reader_url = (create_reader_url_t)hook_import(base, "MFCreateSourceReaderFromURL", hook_create_reader_url);
+    load_media_dll();
+    real_mft_enum_ex = (mft_enum_ex_t)hook_import(base, "mfplat.dll", "MFTEnumEx", hook_mft_enum_ex);
+    real_create_from_url = (create_from_url_t)hook_import(base, "mfreadwrite.dll", "MFCreateSinkWriterFromURL", hook_create_from_url);
+    real_create_reader_url = (create_reader_url_t)hook_import(base, "mfreadwrite.dll", "MFCreateSourceReaderFromURL", hook_create_reader_url);
 }

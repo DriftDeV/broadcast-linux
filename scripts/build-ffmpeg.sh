@@ -1,7 +1,8 @@
 #!/bin/bash
 # Two things come from the FFmpeg 8.1 sources (downloaded from ffmpeg.org, nothing of FFmpeg is stored in this repo):
 # 1. a libavformat that can write mp4/mov/wav, to replace the demux-only one bundled with GE-Proton;
-# 2. nvb_aac.dll, an AAC encoder MFT (src/aac-mft) linked statically against FFmpeg's native AAC encoder.
+# 2. nvb_media.dll (src/media): an AAC encoder MFT and an mp4 sink writer, linked statically against FFmpeg's native
+#    AAC encoder and mp4 muxer (Wine has no AAC encoder and its mp4 sink is a stub).
 # Details of (1):
 # GE's FFmpeg is configured with --disable-everything and no muxers, so winedmo cannot create an mp4 sink
 # ("Requested output format 'mp4' is not known"). Only libavformat is replaced: the version must match GE's
@@ -38,14 +39,16 @@ printf '#!/bin/sh\nexec %s ar "$@"\n' "$ZIG" > zar
 printf '#!/bin/sh\nexec %s ranlib "$@"\n' "$ZIG" > zranlib
 printf '#!/bin/sh\nexec %s nm "$@"\n' "$ZIG" > znm
 chmod +x zcc zar zranlib znm
-if [ ! -f config.h ]; then
+if [ ! -f config-v2.stamp ]; then
+    rm -f config.h
     ../ffmpeg-$VER/configure --enable-cross-compile --arch=x86_64 --target-os=mingw32 --cc="$PWD/zcc" --ar="$PWD/zar" \
         --ranlib="$PWD/zranlib" --nm="$PWD/znm" --disable-stripping --enable-static --disable-shared --disable-pic --disable-asm \
-        --disable-everything --disable-programs --disable-doc --disable-avformat --disable-avdevice --disable-avfilter \
+        --disable-everything --disable-programs --disable-doc --disable-avdevice --disable-avfilter \
         --disable-swscale --disable-swresample --disable-network --disable-autodetect --disable-debug \
-        --enable-encoder=aac > configure.log 2>&1
+        --enable-encoder=aac --enable-muxer=mp4 --enable-protocol=file > configure.log 2>&1
+    touch config-v2.stamp
 fi
-make -j"$(nproc)" libavcodec/libavcodec.a libavutil/libavutil.a > make.log 2>&1
-$ZIG cc -target x86_64-windows-gnu -O2 -shared -I. -I"../ffmpeg-$VER" -o "$OUT/nvb_aac.dll" "$ROOT/src/aac-mft/aacmft.c" \
-    libavcodec/libavcodec.a libavutil/libavutil.a -lmfplat -lmfuuid -lole32 -luuid -lbcrypt
-echo "built $OUT/nvb_aac.dll"
+make -j"$(nproc)" libavformat/libavformat.a libavcodec/libavcodec.a libavutil/libavutil.a > make.log 2>&1
+$ZIG cc -target x86_64-windows-gnu -O2 -shared -I. -I"../ffmpeg-$VER" -o "$OUT/nvb_media.dll" "$ROOT/src/media/aacmft.c" "$ROOT/src/media/mp4sink.c" \
+    libavformat/libavformat.a libavcodec/libavcodec.a libavutil/libavutil.a -lmfplat -lmfuuid -lole32 -luuid -lbcrypt
+echo "built $OUT/nvb_media.dll"

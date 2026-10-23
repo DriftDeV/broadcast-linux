@@ -1,4 +1,5 @@
-/* AAC encoder MFT for Wine, built on FFmpeg's native AAC-LC encoder (static, LGPL).
+/* nvb_media.dll, part 1: AAC encoder MFT for Wine, built on FFmpeg's native AAC-LC encoder (static, LGPL).
+   (part 2, the mp4 sink writer, is mp4sink.c)
    Wine ships no AAC encoder, so the core's file post-processing stops with "No AAC encoder MFT found" (0xc00d5212)
    when it writes an mp4. nvb_aac_register() adds this transform to the process's local MFT list; the core's
    MFTEnumEx(MFT_CATEGORY_AUDIO_ENCODER, output = AAC) then finds it.
@@ -13,11 +14,25 @@
 #include <mftransform.h>
 #include <mferror.h>
 #include <codecapi.h>
+#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/frame.h>
+
+/* the nvcuda shim hands us its logger so that everything ends up in one log file */
+static void (*shim_log)(const char *fmt, ...);
+__declspec(dllexport) void nvb_media_set_logger(void (*fn)(const char *fmt, ...)) { shim_log = fn; }
+void nvb_log(const char *fmt, ...)
+{
+    char b[400];
+    va_list ap;
+    if (!shim_log) return;
+    va_start(ap, fmt); vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
+    shim_log("%s", b);
+}
 
 #define FRAME_SAMPLES 1024
 #define MAX_PACKET    8192
@@ -44,6 +59,7 @@ typedef struct {
     LONGLONG frames_sent, packets_out;
     BOOL drained;
     pkt_node *head, *tail;
+    unsigned n_in, n_out;
 } aac_mft;
 
 static int rate_index(UINT32 r)
@@ -202,6 +218,7 @@ static void drain(aac_mft *m)
     m->drained = TRUE;
 }
 
+void nvb_log(const char *fmt, ...);
 static aac_mft *impl(IMFTransform *i) { return (aac_mft *)i; }
 
 static HRESULT WINAPI t_QueryInterface(IMFTransform *i, REFIID riid, void **out)
@@ -392,6 +409,7 @@ static HRESULT WINAPI t_ProcessMessage(IMFTransform *i, MFT_MESSAGE_TYPE msg, UL
         break;
     case MFT_MESSAGE_COMMAND_DRAIN:
     case MFT_MESSAGE_NOTIFY_END_OF_STREAM:
+        nvb_log("aac: drain/eos message %d (in=%u out=%u)", (int)msg, m->n_in, m->n_out);
         drain(m);
         break;
     case MFT_MESSAGE_SET_D3D_MANAGER:
@@ -445,6 +463,7 @@ static HRESULT WINAPI t_ProcessInput(IMFTransform *i, DWORD id, IMFSample *sampl
     }
     IMFMediaBuffer_Release(buf);
 done:
+    if ((m->n_in++ % 200) == 0) nvb_log("aac: input #%u hr=%08lx pcm_frames=%zu queued=%d", m->n_in - 1, hr, m->pcm_frames, m->head != NULL);
     LeaveCriticalSection(&m->cs);
     return hr;
 }
@@ -476,6 +495,7 @@ static HRESULT WINAPI t_ProcessOutput(IMFTransform *i, DWORD flags, DWORD count,
             IMFSample_SetUINT32(out->pSample, &MFSampleExtension_CleanPoint, 1);
             m->head = n->next; if (!m->head) m->tail = NULL;
             free(n);
+            if ((m->n_out++ % 200) == 0) nvb_log("aac: output #%u t=%lld ms", m->n_out - 1, out->pSample ? 0LL : 0LL);
             out->dwStatus = 0;
             out->pEvents = NULL;
             if (status) *status = 0;
