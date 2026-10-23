@@ -192,6 +192,14 @@ static DWORD WINAPI dev_exec_thread(LPVOID arg)
 /* ---- virtual camera bridge launcher (NVB_VCAM_BRIDGE=1): keeps C:\nvb-vcam-bridge.exe running ---- */
 static DWORD WINAPI bridge_thread(LPVOID arg)
 {
+    /* the bridge is a separate process: tie it to this one, or it outlives "Exit" in the tray and keeps the whole
+       Wine session (wineserver, umu-run) alive */
+    HANDLE job = CreateJobObjectA(NULL, NULL);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {0};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof(li));
+    }
     Sleep(10000);   /* let the core come up first */
     for (;;) {
         STARTUPINFOA si = { sizeof(si) };
@@ -199,6 +207,7 @@ static DWORD WINAPI bridge_thread(LPVOID arg)
         char cmd[] = "C:\\nvb-vcam-bridge.exe";
         if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
             logf_("vcam bridge started pid %lu", pi.dwProcessId);
+            if (job && !AssignProcessToJobObject(job, pi.hProcess)) logf_("vcam bridge job assign failed %lu", GetLastError());
             WaitForSingleObject(pi.hProcess, INFINITE);
             CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
             logf_("vcam bridge exited, restarting");
