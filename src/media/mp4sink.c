@@ -270,7 +270,7 @@ static HRESULT WINAPI w_WriteSample(IMFSinkWriter *i, DWORD index, IMFSample *sa
             av_packet_rescale_ts(pkt, src, s->st->time_base);
             EnterCriticalSection(&w->cs);
             if (av_interleaved_write_frame(w->fc, pkt) < 0) hr = E_FAIL;
-            if ((w->written[index]++ % (s->video ? 10 : 50)) == 0) nvb_log("mp4sink: stream %lu sample #%u t=%lld ms size=%lu key=%d", index, w->written[index] - 1, t / 10000, len, !!(pkt->flags & AV_PKT_FLAG_KEY));
+            if ((w->written[index]++ % 500) == 0) nvb_log("mp4sink: stream %lu sample #%u t=%lld ms size=%lu key=%d", index, w->written[index] - 1, t / 10000, len, !!(pkt->flags & AV_PKT_FLAG_KEY));
             LeaveCriticalSection(&w->cs);
         }
         av_packet_free(&pkt);

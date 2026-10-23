@@ -316,6 +316,100 @@ static HRESULT WINAPI hook_get_native(IMFSourceReader *r, DWORD stream, DWORD in
     return MF_E_NO_MORE_TYPES;
 }
 
+/* ReadSample(ANY_STREAM).
+   Wine's source reader loses data when asked for ANY_STREAM: it reports the end of stream of the first finished stream
+   and then drops what the others still hold (a 15.6 s file lost 5 s of audio, a 5 s file 0.7 s), and afterwards
+   answers every ANY_STREAM read with ENDOFSTREAM and actualStreamIndex = ANY_STREAM, so the core, which waits for the
+   remaining stream's own end of stream, polls forever. Reads of one explicit stream are lossless, so ANY_STREAM is
+   emulated: always read, explicitly, the selected stream whose last timestamp is lowest (what Windows' reader does).
+   End of stream is then reported per stream, with that stream's index. */
+typedef HRESULT (WINAPI *read_sample_t)(IMFSourceReader *, DWORD, DWORD, DWORD *, DWORD *, LONGLONG *, IMFSample **);
+static read_sample_t real_read_sample;
+static unsigned long long (*aac_idle_ms)(void);     /* from nvb_media.dll */
+
+#define EOS_READERS 8
+#define EOS_STREAMS 8
+static struct { IMFSourceReader *reader; unsigned ended; LONGLONG last_ts[EOS_STREAMS]; unsigned count[EOS_STREAMS]; } eos_state[EOS_READERS];
+static CRITICAL_SECTION eos_cs;
+static INIT_ONCE eos_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK eos_init(PINIT_ONCE o, PVOID p, PVOID *c) { InitializeCriticalSection(&eos_cs); return TRUE; }
+
+static int reader_slot(IMFSourceReader *r)
+{
+    int i, free_slot = -1;
+    for (i = 0; i < EOS_READERS; i++) {
+        if (eos_state[i].reader == r) return i;
+        if (!eos_state[i].reader && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) free_slot = 0;       /* more live readers than slots: recycle the first */
+    memset(&eos_state[free_slot], 0, sizeof(eos_state[free_slot]));
+    eos_state[free_slot].reader = r;
+    return free_slot;
+}
+
+/* the selected stream that should be read next, or -1 if every selected stream has ended */
+static int next_stream(IMFSourceReader *r, int slot)
+{
+    DWORD i;
+    int best = -1;
+    for (i = 0; i < EOS_STREAMS; i++) {
+        BOOL selected = FALSE;
+        IMFMediaType *nt = NULL;
+        if (eos_state[slot].ended & (1u << i)) continue;
+        if (FAILED(IMFSourceReader_GetStreamSelection(r, i, &selected)) || !selected) continue;
+        if (FAILED(IMFSourceReader_GetNativeMediaType(r, i, 0, &nt))) continue;
+        IMFMediaType_Release(nt);
+        if (best < 0 || eos_state[slot].last_ts[i] < eos_state[slot].last_ts[best]) best = (int)i;
+    }
+    return best;
+}
+
+static HRESULT WINAPI hook_read_sample(IMFSourceReader *r, DWORD stream, DWORD flags, DWORD *actual, DWORD *sflags, LONGLONG *ts, IMFSample **sample)
+{
+    DWORD a = 0, f = 0;
+    LONGLONG t = 0;
+    IMFSample *smp = NULL;
+    HRESULT hr;
+    int slot, pick = -1;
+    BOOL all_done;
+    if (!actual) actual = &a;
+    if (!sflags) sflags = &f;
+    if (!ts) ts = &t;
+    if (!sample) sample = &smp;
+    InitOnceExecuteOnce(&eos_once, eos_init, NULL, NULL);
+    if (stream == MF_SOURCE_READER_ANY_STREAM) {
+        EnterCriticalSection(&eos_cs);
+        slot = reader_slot(r);
+        pick = next_stream(r, slot);
+        LeaveCriticalSection(&eos_cs);
+    }
+    hr = real_read_sample(r, pick >= 0 ? (DWORD)pick : stream, flags, actual, sflags, ts, sample);
+    if (FAILED(hr)) return hr;
+    EnterCriticalSection(&eos_cs);
+    slot = reader_slot(r);
+    if (*actual < EOS_STREAMS) {
+        DWORD k = *actual;
+        if (*sflags & MF_SOURCE_READERF_ENDOFSTREAM) {
+            eos_state[slot].ended |= 1u << k;
+            logf_("srcreader: stream %lu ended after %u samples, last at %lld ms%s", k, eos_state[slot].count[k], eos_state[slot].last_ts[k] / 10000, pick >= 0 ? "" : " (explicit read)");
+        } else {
+            eos_state[slot].ended &= ~(1u << k);        /* data again (seek/restart) */
+            if (*sample) { eos_state[slot].count[k]++; eos_state[slot].last_ts[k] = *ts; }
+        }
+    }
+    all_done = (*sflags & MF_SOURCE_READERF_ENDOFSTREAM) && next_stream(r, slot) < 0;
+    LeaveCriticalSection(&eos_cs);
+    /* Windows' reader is throttled by the core's queues, so the last end of stream arrives when the audio chain is
+       nearly drained; Wine reads the whole file at once. Hold the last end of stream back until the AAC encoder has been
+       idle for a second (at most 60 s) so the core does not stop its audio stages while data is still queued. */
+    if (all_done && aac_idle_ms) {
+        DWORD waited = 0;
+        while (waited < 60000 && aac_idle_ms() < 1000) { Sleep(50); waited += 50; }
+        if (waited) logf_("srcreader: end of stream held back %lu ms until audio drained", waited);
+    }
+    return hr;
+}
+
 /* the reader is Wine's own object: patch GetNativeMediaType in its (shared) vtable, once */
 static void patch_reader(IMFSourceReader *r)
 {
@@ -325,7 +419,12 @@ static void patch_reader(IMFSourceReader *r)
     if (!VirtualProtect(&vt->GetNativeMediaType, sizeof(void *), PAGE_READWRITE, &old)) { logf_("srcreader: VirtualProtect failed %lu", GetLastError()); return; }
     real_get_native = vt->GetNativeMediaType;
     vt->GetNativeMediaType = hook_get_native;
+    if (VirtualProtect(&vt->ReadSample, sizeof(void *), PAGE_READWRITE, &old)) {
+        real_read_sample = vt->ReadSample;
+        vt->ReadSample = hook_read_sample;
+    }
     VirtualProtect(&vt->GetNativeMediaType, sizeof(void *), old, &old);
+    VirtualProtect(&vt->ReadSample, sizeof(void *), old, &old);
     logf_("srcreader: GetNativeMediaType hooked");
 }
 
@@ -392,6 +491,7 @@ static void load_media_dll(void)
     if (!reg) { logf_("mfhooks: nvb_media.dll not available (%lu), mp4 export will fail", GetLastError()); return; }
     if (set_logger) set_logger(logf_);
     mp4_create = (mp4_create_t)GetProcAddress(m, "nvb_mp4_create");
+    aac_idle_ms = (unsigned long long (*)(void))GetProcAddress(m, "nvb_aac_idle_ms");
     logf_("mfhooks: AAC encoder MFT registered hr=%08lx, mp4 sink %s", reg(), mp4_create ? "available" : "missing");
 }
 

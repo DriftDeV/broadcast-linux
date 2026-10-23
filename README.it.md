@@ -243,6 +243,10 @@ A Wine mancano tre cose di cui il core ha bisogno per elaborare i file. Sono tut
   errore del job -9111). Lo shim fornisce un piccolo `IMFSinkWriter` WAV.
 - **Input video**: Wine elenca il formato decodificato (NV12) prima di quello compresso (H264) come tipo nativo di uno
   stream video, e il core legge il tipo 0 come codec ("Source video codec is not supported"). Lo shim li riordina.
+- **Lettura insieme di audio e video**: il source reader di Wine perde dati con `ReadSample(ANY_STREAM)` (la coda
+  dell'audio, fino a un terzo su un file da 15 s) e poi risponde con un fine-flusso che il core non accetta (export
+  fermo "in elaborazione"). Lo shim emula `ANY_STREAM` con letture esplicite dello stream più indietro, riporta ogni
+  fine-flusso con il suo indice e trattiene l'ultimo finché l'encoder AAC è inattivo.
 - **Output MP4**: il `libavformat` incluso in GE-Proton non ha muxer, Wine non ha un encoder AAC (`No AAC encoder MFT
   found`) e il suo media sink MP4 è un abbozzo (`BeginWriting` fallisce con `E_NOTIMPL`). `scripts/build-ffmpeg.sh`
   compila un `libavformat` con i muxer e `nvb_media.dll` (`src/media`): una transform AAC e un sink writer mp4, entrambi

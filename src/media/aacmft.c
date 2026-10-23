@@ -34,6 +34,15 @@ void nvb_log(const char *fmt, ...)
     shim_log("%s", b);
 }
 
+/* time of the last ProcessInput/ProcessOutput; the shim delays the source reader's end of stream until this is idle */
+static volatile LONGLONG last_activity;
+static void touch(void) { last_activity = (LONGLONG)GetTickCount64(); }
+__declspec(dllexport) unsigned long long nvb_aac_idle_ms(void)
+{
+    LONGLONG t = last_activity;
+    return t ? (unsigned long long)((LONGLONG)GetTickCount64() - t) : ~0ULL;
+}
+
 #define FRAME_SAMPLES 1024
 #define MAX_PACKET    8192
 #define HUNDRED_NS    10000000LL
@@ -432,6 +441,7 @@ static HRESULT WINAPI t_ProcessInput(IMFTransform *i, DWORD id, IMFSample *sampl
     if (id) return MF_E_INVALIDSTREAMNUMBER;
     if (!sample) return E_POINTER;
     if (!m->in_type || !m->out_type) return MF_E_TRANSFORM_TYPE_NOT_SET;
+    touch();
     EnterCriticalSection(&m->cs);
     hr = codec_open(m);
     if (FAILED(hr)) goto done;
@@ -463,7 +473,7 @@ static HRESULT WINAPI t_ProcessInput(IMFTransform *i, DWORD id, IMFSample *sampl
     }
     IMFMediaBuffer_Release(buf);
 done:
-    if ((m->n_in++ % 200) == 0) nvb_log("aac: input #%u hr=%08lx pcm_frames=%zu queued=%d", m->n_in - 1, hr, m->pcm_frames, m->head != NULL);
+    if ((m->n_in++ % 1000) == 0) nvb_log("aac: input #%u hr=%08lx pcm_frames=%zu queued=%d", m->n_in - 1, hr, m->pcm_frames, m->head != NULL);
     LeaveCriticalSection(&m->cs);
     return hr;
 }
@@ -495,7 +505,8 @@ static HRESULT WINAPI t_ProcessOutput(IMFTransform *i, DWORD flags, DWORD count,
             IMFSample_SetUINT32(out->pSample, &MFSampleExtension_CleanPoint, 1);
             m->head = n->next; if (!m->head) m->tail = NULL;
             free(n);
-            if ((m->n_out++ % 200) == 0) nvb_log("aac: output #%u t=%lld ms", m->n_out - 1, out->pSample ? 0LL : 0LL);
+            touch();
+            if ((m->n_out++ % 1000) == 0) nvb_log("aac: output #%u t=%lld ms", m->n_out - 1, out->pSample ? 0LL : 0LL);
             out->dwStatus = 0;
             out->pEvents = NULL;
             if (status) *status = 0;

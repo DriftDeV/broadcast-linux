@@ -239,6 +239,10 @@ signature-checked; the shim redirects the core's imports from `mfreadwrite.dll`/
   -9111). The shim provides a small WAV `IMFSinkWriter`.
 - **Video input**: Wine lists the decoded format (NV12) before the compressed one (H264) as the native type of a video
   stream, and the core reads type 0 as the codec ("Source video codec is not supported"). The shim reorders them.
+- **Reading audio and video together**: Wine's source reader loses data on `ReadSample(ANY_STREAM)` (the audio tail,
+  up to a third of it on a 15 s file) and then answers with an end of stream the core never accepts (export stuck "in
+  progress"). The shim emulates `ANY_STREAM` with explicit reads of the stream that is furthest behind, reports each
+  end of stream with its own index, and holds the last one back until the AAC encoder is idle.
 - **MP4 output**: GE-Proton's bundled `libavformat` has no muxers, Wine has no AAC encoder (`No AAC encoder MFT found`)
   and its MP4 media sink is a stub (`BeginWriting` fails with `E_NOTIMPL`). `scripts/build-ffmpeg.sh` builds a
   `libavformat` with muxers and `nvb_media.dll` (`src/media`): an AAC encoder transform and an mp4 sink writer, both on
