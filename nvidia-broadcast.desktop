@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NVIDIA Broadcast
+Comment=NVIDIA Broadcast (Windows) under Wine with PipeWire and virtual camera
+Exec=@ROOT@/nvidia-broadcast.sh
+Icon=@ICON@
+StartupWMClass=nvidia broadcast.exe
+Terminal=false
+Categories=AudioVideo;Audio;Video;
+Keywords=microphone;camera;noise;background;
