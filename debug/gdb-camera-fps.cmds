@@ -1,0 +1,19 @@
+set pagination off
+set confirm off
+handle SIGUSR1 nostop noprint pass
+handle SIGSEGV nostop noprint pass
+handle SIGUSR2 nostop noprint pass
+handle SIGALRM nostop noprint pass
+handle SIGCHLD nostop noprint pass
+handle SIG34 nostop noprint pass
+handle SIG35 nostop noprint pass
+handle SIG36 nostop noprint pass
+break *0x7fffffa713ad
+commands
+silent
+set *(int*)($rbp+0x118)=30
+set $r15=30
+printf "fps written to [rbp+0x118]: w=%d h=%d\n",$r12d,$r13d
+continue
+end
+continue
