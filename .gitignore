@@ -2,3 +2,4 @@ build/
 *.orig
 # NVIDIA installer files: never commit
 source/
+__pycache__/
