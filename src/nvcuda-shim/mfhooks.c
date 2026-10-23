@@ -1,9 +1,11 @@
-/* WAV sink writer for file post-processing.
+/* Media Foundation fixes for file post-processing, applied by redirecting NvBroadcastCore.dll's imports from
+   mfreadwrite.dll (the core is signature-checked, so it cannot be patched on disk).
+
+   1. WAV sink writer.
    Wine's mfreadwrite creates the writer for a ".wav" URL through MFCreateWAVEMediaSink(bytestream, NULL), which Wine's
    mfsrcsnk.dll rejects with E_POINTER (0x80004003), so the core's MFCreateSinkWriterFromURL fails and the whole job
-   dies with errorStatus -9111. NvBroadcastCore.dll is signature-checked, so instead of patching it we redirect its
-   import of MFCreateSinkWriterFromURL: ".wav" URLs get the minimal IMFSinkWriter below, everything else goes to the
-   real function. The writer stores the samples exactly as they arrive (the header is taken from the input media type). */
+   dies with errorStatus -9111. ".wav" URLs get the minimal IMFSinkWriter below, everything else goes to the real
+   function. The writer stores the samples exactly as they arrive (the header is taken from the input media type). */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
@@ -205,6 +207,23 @@ static BOOL is_wav_url(LPCWSTR url)
     return n > 4 && !_wcsicmp(url + n - 4, L".wav");
 }
 
+/* log every attribute the core passes to the real sink writer factory (diagnostics for container failures) */
+static void dump_attributes(IMFAttributes *a)
+{
+    UINT32 n = 0, i;
+    if (FAILED(IMFAttributes_GetCount(a, &n))) return;
+    for (i = 0; i < n; i++) {
+        GUID key = {0};
+        PROPVARIANT v;
+        PropVariantInit(&v);
+        if (FAILED(IMFAttributes_GetItemByIndex(a, i, &key, &v))) continue;
+        if (v.vt == VT_UI4) logf_("  attr %08lx-%04x-%04x = %lu", key.Data1, key.Data2, key.Data3, v.ulVal);
+        else if (v.vt == VT_CLSID && v.puuid) logf_("  attr %08lx-%04x-%04x = guid %08lx-%04x-%04x", key.Data1, key.Data2, key.Data3, v.puuid->Data1, v.puuid->Data2, v.puuid->Data3);
+        else logf_("  attr %08lx-%04x-%04x vt=%u", key.Data1, key.Data2, key.Data3, v.vt);
+        PropVariantClear(&v);
+    }
+}
+
 static HRESULT WINAPI hook_create_from_url(LPCWSTR url, IMFByteStream *bs, IMFAttributes *attr, IMFSinkWriter **out)
 {
     if (url && !bs && out && is_wav_url(url) && wcslen(url) < MAX_PATH) {
@@ -219,20 +238,98 @@ static HRESULT WINAPI hook_create_from_url(LPCWSTR url, IMFByteStream *bs, IMFAt
         logf_("wavwriter: created for %ls", url);
         return S_OK;
     }
-    return real_create_from_url(url, bs, attr, out);
+    {
+        HRESULT hr = real_create_from_url(url, bs, attr, out);
+        logf_("mfhooks: MFCreateSinkWriterFromURL(%ls, bytestream=%p, attributes=%p) = %08lx", url ? url : L"(null)", (void *)bs, (void *)attr, hr);
+        if (attr) dump_attributes(attr);
+        return hr;
+    }
 }
 
-/* point the core's import of MFCreateSinkWriterFromURL at hook_create_from_url */
-void wavwriter_install(void)
+/* 2. Source reader native media types.
+   Wine lists the decoded format (NV12) before the compressed one (H264) for a video stream; Windows lists the
+   compressed one first and the core takes type 0 as the file's codec, so every mp4 is rejected ("Source video codec is
+   not supported"). The hook reorders the native types of video streams: compressed first, raw formats after. */
+typedef HRESULT (WINAPI *get_native_t)(IMFSourceReader *, DWORD, DWORD, IMFMediaType **);
+static get_native_t real_get_native;
+typedef HRESULT (WINAPI *create_reader_url_t)(LPCWSTR, IMFAttributes *, IMFSourceReader **);
+static create_reader_url_t real_create_reader_url;
+
+static BOOL is_raw_video(const GUID *sub)
 {
-    BYTE *base = (BYTE *)GetModuleHandleA("NvBroadcastCore.dll");
-    IMAGE_NT_HEADERS *nt;
-    IMAGE_DATA_DIRECTORY dir;
+    static const BYTE base[8] = {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71};
+    if (sub->Data2 != 0 || sub->Data3 != 0x10 || memcmp(sub->Data4, base, 8)) return FALSE;
+    switch (sub->Data1) {
+    case 20: case 21: case 22: case 23:                 /* RGB24, ARGB32, RGB32, RGB565 */
+    case 0x3231564e: case 0x32595559: case 0x56595559:  /* NV12, YUY2, YUYV */
+    case 0x43425949: case 0x30323449: case 0x32315659:  /* IYUV, I420, YV12 */
+    case 0x59565955: return TRUE;                       /* UYVY */
+    }
+    return FALSE;
+}
+
+static BOOL type_is(IMFMediaType *t, BOOL want_raw)
+{
+    GUID sub = {0};
+    IMFMediaType_GetGUID(t, &MF_MT_SUBTYPE, &sub);
+    return is_raw_video(&sub) == want_raw;
+}
+
+static HRESULT WINAPI hook_get_native(IMFSourceReader *r, DWORD stream, DWORD index, IMFMediaType **out)
+{
+    IMFMediaType *t0 = NULL;
+    GUID major = {0};
+    HRESULT hr;
+    DWORD pass, k, seen = 0;
+    if (stream >= 0xfffffff0 || FAILED(real_get_native(r, stream, 0, &t0))) return real_get_native(r, stream, index, out);
+    IMFMediaType_GetGUID(t0, &MF_MT_MAJOR_TYPE, &major);
+    IMFMediaType_Release(t0);
+    if (!IsEqualGUID(&major, &MFMediaType_Video)) return real_get_native(r, stream, index, out);
+    for (pass = 0; pass < 2; pass++) {      /* pass 0: compressed types, pass 1: raw ones */
+        for (k = 0; ; k++) {
+            IMFMediaType *t = NULL;
+            hr = real_get_native(r, stream, k, &t);
+            if (FAILED(hr)) break;
+            if (type_is(t, pass == 1)) {
+                if (seen == index) {
+                    if (index == 0) { GUID sub = {0}; IMFMediaType_GetGUID(t, &MF_MT_SUBTYPE, &sub); logf_("srcreader: stream %lu native type 0 -> %08lx (was type %lu)", stream, sub.Data1, k); }
+                    *out = t; return S_OK;
+                }
+                seen++;
+            }
+            IMFMediaType_Release(t);
+        }
+    }
+    return MF_E_NO_MORE_TYPES;
+}
+
+/* the reader is Wine's own object: patch GetNativeMediaType in its (shared) vtable, once */
+static void patch_reader(IMFSourceReader *r)
+{
+    IMFSourceReaderVtbl *vt = (IMFSourceReaderVtbl *)r->lpVtbl;
+    DWORD old;
+    if (real_get_native || vt->GetNativeMediaType == hook_get_native) return;
+    if (!VirtualProtect(&vt->GetNativeMediaType, sizeof(void *), PAGE_READWRITE, &old)) { logf_("srcreader: VirtualProtect failed %lu", GetLastError()); return; }
+    real_get_native = vt->GetNativeMediaType;
+    vt->GetNativeMediaType = hook_get_native;
+    VirtualProtect(&vt->GetNativeMediaType, sizeof(void *), old, &old);
+    logf_("srcreader: GetNativeMediaType hooked");
+}
+
+static HRESULT WINAPI hook_create_reader_url(LPCWSTR url, IMFAttributes *attr, IMFSourceReader **out)
+{
+    HRESULT hr = real_create_reader_url(url, attr, out);
+    if (SUCCEEDED(hr) && out && *out) patch_reader(*out);
+    return hr;
+}
+
+/* point one of the core's imports from mfreadwrite.dll at a replacement, return the original */
+static void *hook_import(BYTE *base, const char *func, void *hook)
+{
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     IMAGE_IMPORT_DESCRIPTOR *imp;
-    if (!base) return;
-    nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
-    dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!dir.VirtualAddress) return;
+    if (!dir.VirtualAddress) return NULL;
     for (imp = (IMAGE_IMPORT_DESCRIPTOR *)(base + dir.VirtualAddress); imp->Name; imp++) {
         IMAGE_THUNK_DATA *names, *funcs;
         if (_stricmp((char *)base + imp->Name, "mfreadwrite.dll")) continue;
@@ -240,17 +337,27 @@ void wavwriter_install(void)
         funcs = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
         for (; names->u1.AddressOfData; names++, funcs++) {
             DWORD old;
+            void *orig;
             IMAGE_IMPORT_BY_NAME *n;
             if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
             n = (IMAGE_IMPORT_BY_NAME *)(base + names->u1.AddressOfData);
-            if (strcmp((char *)n->Name, "MFCreateSinkWriterFromURL")) continue;
-            if (!VirtualProtect(&funcs->u1.Function, sizeof(void *), PAGE_READWRITE, &old)) { logf_("wavwriter: VirtualProtect failed %lu", GetLastError()); return; }
-            real_create_from_url = (create_from_url_t)funcs->u1.Function;
-            funcs->u1.Function = (ULONG_PTR)hook_create_from_url;
+            if (strcmp((char *)n->Name, func)) continue;
+            if (!VirtualProtect(&funcs->u1.Function, sizeof(void *), PAGE_READWRITE, &old)) { logf_("mfhooks: VirtualProtect failed %lu", GetLastError()); return NULL; }
+            orig = (void *)funcs->u1.Function;
+            funcs->u1.Function = (ULONG_PTR)hook;
             VirtualProtect(&funcs->u1.Function, sizeof(void *), old, &old);
-            logf_("wavwriter: MFCreateSinkWriterFromURL import hooked");
-            return;
+            logf_("mfhooks: %s import hooked", func);
+            return orig;
         }
     }
-    logf_("wavwriter: import not found");
+    logf_("mfhooks: import %s not found", func);
+    return NULL;
+}
+
+void mfhooks_install(void)
+{
+    BYTE *base = (BYTE *)GetModuleHandleA("NvBroadcastCore.dll");
+    if (!base) return;
+    real_create_from_url = (create_from_url_t)hook_import(base, "MFCreateSinkWriterFromURL", hook_create_from_url);
+    real_create_reader_url = (create_reader_url_t)hook_import(base, "MFCreateSourceReaderFromURL", hook_create_reader_url);
 }

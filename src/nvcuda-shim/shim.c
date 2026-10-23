@@ -217,13 +217,13 @@ static DWORD WINAPI bridge_thread(LPVOID arg)
     return 0;
 }
 
-void wavwriter_install(void);
+void mfhooks_install(void);
 
 static INIT_ONCE dev_once = INIT_ONCE_STATIC_INIT;
 static BOOL CALLBACK start_dev_hook(PINIT_ONCE o, PVOID p, PVOID *c)
 {
     char v[8] = {0};
-    wavwriter_install();
+    mfhooks_install();
     if (GetEnvironmentVariableA("NVB_VCAM_BRIDGE", v, sizeof(v)) && v[0] == '1') {
         HANDLE t = CreateThread(NULL, 0, bridge_thread, NULL, 0, NULL);
         if (t) CloseHandle(t);

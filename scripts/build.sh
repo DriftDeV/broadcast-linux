@@ -14,7 +14,7 @@ WIN=(-target x86_64-windows-gnu -O2)
 mkdir -p "$OUT"
 
 echo "[1/5] nvcuda shim"
-"${ZIG[@]}" "${WIN[@]}" -shared -o "$OUT/nvcuda.dll" "$ROOT/src/nvcuda-shim/shim.c" "$ROOT/src/nvcuda-shim/wavwriter.c" "$ROOT/src/nvcuda-shim/nvcuda.def" -lmfuuid -lole32 -luuid
+"${ZIG[@]}" "${WIN[@]}" -shared -o "$OUT/nvcuda.dll" "$ROOT/src/nvcuda-shim/shim.c" "$ROOT/src/nvcuda-shim/mfhooks.c" "$ROOT/src/nvcuda-shim/nvcuda.def" -lmfuuid -lole32 -luuid
 echo "[2/5] nvapi shim"
 "${ZIG[@]}" "${WIN[@]}" -shared -o "$OUT/nvapi64.dll" "$ROOT/src/nvapi-shim/nvapi_shim.c"
 echo "[3/5] virtual audio device replacement"
